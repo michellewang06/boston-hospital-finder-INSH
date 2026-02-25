@@ -35,11 +35,7 @@
 
     #main { display: flex; height: calc(100vh - 110px); }
 
-    /* Map style */
-    #map {
-      flex: 1;
-      height: 100%;
-    }
+    #map { flex: 1; height: 100%; }
 
     #sidebar {
       width: 320px;
@@ -71,6 +67,17 @@
       display: inline-block; background: #003087; color: white;
       border-radius: 10px; padding: 1px 8px; font-size: 11px; margin-left: 6px;
     }
+
+    .popup-table {
+      font-size: 12px;
+      margin-top: 6px;
+      border-collapse: collapse;
+      width: 100%;
+    }
+    .popup-table td {
+      padding: 3px 4px;
+      border-bottom: 1px solid #eee;
+    }
   </style>
 </head>
 <body>
@@ -92,9 +99,7 @@
 </div>
 
 <div id="main">
-
   <div id="map"></div>
-
   <div id="sidebar">
     <div id="sidebar-header">Enter a ZIP code to find nearby hospitals</div>
     <div id="loading">⏳ Loading data...</div>
@@ -102,16 +107,18 @@
   </div>
 </div>
 
-<!-- Leaflet JS -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 
 <script>
 // ── Data URLs ──
 const HOSPITAL_CSV = "https://data.boston.gov/dataset/d9871e89-2d1e-4ecf-b0de-046f553027c0/resource/6222085d-ee88-45c6-ae40-0c7464620d64/download/hospital-locations.csv";
 
+const VULN_CSV = "https://data.boston.gov/dataset/climate-ready-boston-social-vulnerability/resource/3cfa5c04-8b2d-49b6-9c53-5f7fa693596e/download/climate-ready-boston-social-vulnerability.csv";
+
 // ── State ──
 let map;
 let markersLayer;
+let vulnByNeigh = {};
 
 // ── Initialize Map ──
 function initMap() {
@@ -124,15 +131,53 @@ function initMap() {
   markersLayer = L.layerGroup().addTo(map);
 }
 
-// ── Simple CSV parser ──
+// ── CSV parser ──
 function parseCSV(text) {
-  const rows = text.split("\n");
+  const rows = text.trim().split("\n");
   const headers = rows[0].split(",");
   return rows.slice(1).map(r => {
     const vals = r.split(",");
     const obj = {};
     headers.forEach((h,i) => obj[h.trim().toUpperCase()] = vals[i]);
     return obj;
+  });
+}
+
+// ── Vulnerability Loader ──
+async function loadVulnerability() {
+  const text = await fetch(VULN_CSV).then(r => r.text());
+  const rows = parseCSV(text);
+
+  const grouped = {};
+
+  rows.forEach(r => {
+    const name = (r["NAME"] || "").toUpperCase().trim();
+    if (!name) return;
+
+    if (!grouped[name]) {
+      grouped[name] = {
+        pop: 0,
+        elderly: 0,
+        dis: 0,
+        lep: 0
+      };
+    }
+
+    grouped[name].pop += parseFloat(r["POP100_RE"]) || 0;
+    grouped[name].elderly += parseFloat(r["OLDERADULT"]) || 0;
+    grouped[name].dis += parseFloat(r["TOTDIS"]) || 0;
+    grouped[name].lep += parseFloat(r["LEP"]) || 0;
+  });
+
+  Object.keys(grouped).forEach(name => {
+    const g = grouped[name];
+    if (g.pop > 0) {
+      vulnByNeigh[name] = {
+        elderly: (g.elderly / g.pop) * 100,
+        disabilities: (g.dis / g.pop) * 100,
+        limitedEnglish: (g.lep / g.pop) * 100
+      };
+    }
   });
 }
 
@@ -150,13 +195,11 @@ async function getZipCoords(zip) {
   const d = await res.json();
   return {
     lat: parseFloat(d.places[0].latitude),
-    lon: parseFloat(d.places[0].longitude),
-    city: d.places[0]["place name"],
-    state: d.places[0]["state"]
+    lon: parseFloat(d.places[0].longitude)
   };
 }
 
-// ── Create Marker ──
+// ── Marker ──
 function makeMarker(lat, lon) {
   return L.circleMarker([lat, lon], {
     radius: 10,
@@ -167,32 +210,20 @@ function makeMarker(lat, lon) {
   });
 }
 
-// ── Render Sidebar ──
-function renderSidebar(matches, markers) {
-  const resultsDiv = document.getElementById("results");
-  resultsDiv.innerHTML = "";
+// ── Popup Builder ──
+function makePopupHTML(hospital, vuln) {
+  if (!vuln) return `<b>${hospital.NAME}</b><br>${hospital.AD || ""}`;
 
-  matches.forEach((h, idx) => {
-    const card = document.createElement("div");
-    card.className = "hospital-card";
-    card.innerHTML = `
-      <div class="hospital-name">
-        ${h.NAME}
-        <span class="dist-badge">${h.dist.toFixed(1)} mi</span>
-      </div>
-      <div class="hospital-meta">📍 ${h.AD || ""}</div>
-    `;
+  return `
+    <b>${hospital.NAME}</b><br>
+    ${hospital.AD || ""}
 
-    card.onclick = () => {
-      document.querySelectorAll(".hospital-card").forEach(c => c.classList.remove("active"));
-      card.classList.add("active");
-
-      map.panTo([h.lat, h.lon]);
-      markers[idx].openPopup();
-    };
-
-    resultsDiv.appendChild(card);
-  });
+    <table class="popup-table">
+      <tr><td>Elderly (65+)</td><td>${vuln.elderly.toFixed(1)}%</td></tr>
+      <tr><td>Disabilities</td><td>${vuln.disabilities.toFixed(1)}%</td></tr>
+      <tr><td>Limited English</td><td>${vuln.limitedEnglish.toFixed(1)}%</td></tr>
+    </table>
+  `;
 }
 
 // ── Main Search ──
@@ -212,16 +243,19 @@ async function findHospitals() {
   resultsDiv.innerHTML = "";
   markersLayer.clearLayers();
 
-  const coords = await getZipCoords(zipInput);
+  const [coords, hospText] = await Promise.all([
+    getZipCoords(zipInput),
+    fetch(HOSPITAL_CSV).then(r => r.text()),
+    loadVulnerability()
+  ]);
+
   if (!coords) {
     loading.style.display = "none";
     resultsDiv.innerHTML = "<p style='padding:16px;color:red'>ZIP not found.</p>";
     return;
   }
 
-  const hospText  = await fetch(HOSPITAL_CSV).then(r => r.text());
   const hospitals = parseCSV(hospText);
-
   const coordRx = /\(\s*([-\d.]+),\s*([-\d.]+)\s*\)/;
 
   const matches = hospitals.map(h => {
@@ -245,9 +279,13 @@ async function findHospitals() {
   const markers = [];
 
   matches.forEach(h => {
+    const neighKey = (h.NEIGH || "").toUpperCase().trim();
+    const vuln = vulnByNeigh[neighKey];
+
     const marker = makeMarker(h.lat, h.lon)
       .addTo(markersLayer)
-      .bindPopup(`<b>${h.NAME}</b><br>${h.AD || ""}`);
+      .bindPopup(makePopupHTML(h, vuln));
+
     markers.push(marker);
   });
 
@@ -259,12 +297,37 @@ async function findHospitals() {
   renderSidebar(matches, markers);
 }
 
-// Enter key support
+// ── Sidebar ──
+function renderSidebar(matches, markers) {
+  const resultsDiv = document.getElementById("results");
+  resultsDiv.innerHTML = "";
+
+  matches.forEach((h, idx) => {
+    const card = document.createElement("div");
+    card.className = "hospital-card";
+    card.innerHTML = `
+      <div class="hospital-name">
+        ${h.NAME}
+        <span class="dist-badge">${h.dist.toFixed(1)} mi</span>
+      </div>
+      <div class="hospital-meta">📍 ${h.AD || ""}</div>
+    `;
+
+    card.onclick = () => {
+      document.querySelectorAll(".hospital-card").forEach(c => c.classList.remove("active"));
+      card.classList.add("active");
+      map.panTo([h.lat, h.lon]);
+      markers[idx].openPopup();
+    };
+
+    resultsDiv.appendChild(card);
+  });
+}
+
 document.getElementById("zip").addEventListener("keydown", e => {
   if (e.key === "Enter") findHospitals();
 });
 
-// Boot
 initMap();
 </script>
 </body>
