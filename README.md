@@ -1,6 +1,6 @@
 # Boston Hospital Finder 🏥
 
-A web app that helps users find hospitals near any US ZIP code, built with open data from the [City of Boston](https://data.boston.gov). This project is used as a hands-on prompt engineering exercise — you will use AI to add real features to a working codebase.
+A web app that helps users find hospitals near any US ZIP code, built with open data from the [City of Boston](https://data.boston.gov). This project is used as a hands-on prompt engineering exercise — you will use AI to add real features to a working codebase. This is also the demo session for final project for anyone who is interested in building an app using open datasets. 
 
 ---
 
